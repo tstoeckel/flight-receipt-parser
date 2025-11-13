@@ -1,0 +1,23 @@
+{
+    "python.languageServer": "Pylance",
+    "python.analysis.autoSearchPaths": true,
+    "python.analysis.extraPaths": [
+        "./src"
+    ],
+    "python.analysis.typeCheckingMode": "basic",
+    // "python.analysis.typeCheckingMode": "strict",
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportConstantRedefinition": "none",
+    },
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.formatOnSave": true,
+        "editor.formatOnPaste": false,
+        "editor.formatOnSaveMode": "file",
+    },
+    "todo-tree.tree.scanMode": "workspace",
+    "black-formatter.args": [
+        "--line-length",
+        "120"
+    ]
+}

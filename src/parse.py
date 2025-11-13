@@ -43,107 +43,103 @@ NAME_HINTS = [
     r"\bName:?\s*(.+)",
 ]
 
+KNOWN_PASSENGERS = ["Andre Ziemke", "Thomas Stoeckel"]
+
 HIN_HINTS = [r"\bHinflug\b", r"\bOutbound\b", r"\bDeparture\b"]
 RUECK_HINTS = [r"\bRückflug\b", r"\bRueckflug\b", r"\bReturn\b"]
 
 FLIGHT_ROW_HINT = re.compile(r"\b(EW\s?\d{2,4})\b", re.IGNORECASE)
+
 
 def sanitize_filename_component(s: str) -> str:
     s = re.sub(r"[\\/:*?\"<>|]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def parse_dates_from_text(lines: List[str]) -> Tuple[Optional[datetime], Optional[datetime]]:
-    def first_date_in(s: str) -> Optional[datetime]:
-        for pat in DATE_PATTERNS:
-            m = re.search(pat, s)
-            if m:
-                groups = m.groups()
-                try:
-                    if len(groups) == 3:
-                        # normalize to yyyy-mm-dd
-                        if len(groups[0]) == 4:
-                            y, mth, d = int(groups[0]), int(groups[1]), int(groups[2])
-                        else:
-                            # dd.mm.yyyy
-                            d, mth, y = int(groups[0]), int(groups[1]), int(groups[2])
-                        return datetime(y, mth, d)
-                except ValueError:
-                    pass
-        return None
+    """
+    Parses flight dates and numbers from lines like:
+    - 'Flight: 13.10.2025 | Flight Number EW 9083 (BIZClass AS)'
+    - 'Flug: 06.10.2025 | Flugnummer: EW 9083 (BASIC H)'
 
-    dep, ret = None, None
+    Returns (departure_date, return_date)
+    """
+    # Combined pattern for both German & English
+    flight_pattern = re.compile(
+        r"(?:Flight|Flug):\s*(\d{1,2}\.\d{1,2}\.\d{4}).*?(?:Flight Number|Flugnummer)[:\s]*?(EW\s*\d{3,4})",
+        re.IGNORECASE,
+    )
 
-    # 1) Look for explicit "Hinflug"/"Rückflug" sections
-    for i, line in enumerate(lines):
-        if any(re.search(h, line, re.IGNORECASE) for h in HIN_HINTS):
-            d = first_date_in(line) or (first_date_in(lines[i+1]) if i+1 < len(lines) else None)
-            if d: dep = d
-        if any(re.search(h, line, re.IGNORECASE) for h in RUECK_HINTS):
-            d = first_date_in(line) or (first_date_in(lines[i+1]) if i+1 < len(lines) else None)
-            if d: ret = d
-
-    if dep and ret:
-        return dep, ret
-
-    # 2) Look near flight rows (lines containing EWxxxx)
-    candidates: List[datetime] = []
-    for i, line in enumerate(lines):
-        if FLIGHT_ROW_HINT.search(line):
-            window = "\n".join(lines[max(0, i-2):min(len(lines), i+3)])
-            d = first_date_in(window)
-            if d:
-                candidates.append(d)
-
-    if candidates:
-        candidates.sort()
-        dep = candidates[0]
-        ret = candidates[-1] if len(candidates) > 1 else None
-        return dep, ret
-
-    # 3) Fallback: pick earliest and latest date in entire text, but try to skip invoice metadata by filtering year range
-    all_dates: List[datetime] = []
+    flights = []
     for line in lines:
-        d = first_date_in(line)
-        if d and 2015 <= d.year <= 2100:
-            all_dates.append(d)
-    if all_dates:
-        all_dates.sort()
-        return all_dates[0], (all_dates[-1] if len(all_dates) > 1 else None)
+        m = flight_pattern.search(line)
+        if m:
+            date_str, flight_no = m.groups()
+            try:
+                date = datetime.strptime(date_str, "%d.%m.%Y")
+                flight_no = flight_no.replace(" ", "")
+                flights.append((date, flight_no))
+            except ValueError:
+                continue
 
-    return None, None
+    if not flights:
+        return None, None
 
-def parse_name_from_text(lines: List[str]) -> Optional[str]:
-    # Try direct hints
-    for line in lines:
-        for pat in NAME_HINTS:
-            m = re.search(pat, line, re.IGNORECASE)
-            if m:
-                name = m.group(1)
-                # Trim trailing artifacts (commas, booking refs, multiple spaces)
-                name = re.sub(r"\s*(Buchungsnr\.?|Booking ref\.?).*$", "", name, flags=re.IGNORECASE)
-                name = re.sub(r"\s{2,}", " ", name).strip(" ,;-")
-                # Invoices sometimes list as LASTNAME/FIRSTNAME
-                if "/" in name and " " not in name:
-                    parts = name.split("/")
-                    if len(parts) == 2:
-                        name = f"{parts[1].title()} {parts[0].title()}"
-                return name if name else None
+    # Sort by date just in case the order in the PDF is reversed
+    flights.sort(key=lambda x: x[0])
 
-    # Heuristic: look for NAME formats like MUSTERMANN MAX directly near "Flug"/"Passenger"
-    for i, line in enumerate(lines):
-        if re.search(r"\b(Flug|Passenger|Passagier|Reisende)\b", line, re.IGNORECASE):
-            window = " ".join(lines[i:i+3])
-            m = re.search(r"\b([A-ZÄÖÜß\-]+)\s+([A-ZÄÖÜß][a-zäöüß\-]+)\b", window)
-            if m:
-                last_upper, first = m.group(1), m.group(2)
-                return f"{first} {last_upper.title()}"
+    dep = flights[0][0]
+    ret = flights[1][0] if len(flights) > 1 else None
+
+    return dep, ret
+
+
+def parse_name_from_text(lines: list[str]) -> str | None:
+    """Return the passenger name by checking against a predefined list."""
+    text = " ".join(lines).lower()
+    for name in KNOWN_PASSENGERS:
+        # match both "First Last" and "LAST/FIRST" variants
+        normalized = name.lower()
+        reversed_variant = " ".join(normalized.split()[::-1])
+        slash_variant = normalized.replace(" ", "/")
+        if normalized in text or reversed_variant in text or slash_variant in text:
+            return name
     return None
 
-def format_date(d: datetime) -> str:
+
+def parse_net_cost_from_text(lines: List[str]) -> Optional[float]:
+    """
+    Extracts the net cost from a line containing '19% VAT' or '19 % MwSt'
+    and three Euro amounts. Example:
+      (3)* 19% VAT (17.95 €) 94.47 € 112.42 €
+    or
+      (3)* 19 % MwSt (17,95 €) 94,47 € 112,42 €
+    """
+    vat_pattern = re.compile(r"19\s?%[\s]*(?:VAT|MwSt)", re.IGNORECASE)
+    euro_pattern = re.compile(r"(\d{1,3}(?:[.,]\d{2}))\s*€")
+
+    for line in lines:
+        if vat_pattern.search(line):
+            euro_values = euro_pattern.findall(line)
+            # Expecting 2 amounts: (VAT, net; gross is in a separate cell, because the layout is a table)
+            if len(euro_values) >= 2:
+                net_str = euro_values[1].replace(",", ".")
+                try:
+                    return float(net_str)
+                except ValueError:
+                    pass
+    return None
+
+
+def format_date(d: datetime, label: str = "") -> str:
     # Change here if you prefer DD.MM.YYYY:
-    # return d.strftime("%d.%m.%Y")
-    return d.strftime("%Y-%m-%d")
+    if label == "hinflug":
+        return d.strftime("%d.%m.")
+    else:
+        return d.strftime("%d.%m.%Y")
+    # return d.strftime("%Y-%m-%d")
+
 
 def extract_lines(pdf_path: Path) -> List[str]:
     text = extract_text(str(pdf_path)) or ""
@@ -152,22 +148,34 @@ def extract_lines(pdf_path: Path) -> List[str]:
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     return lines
 
-def build_filename(passenger: Optional[str], dep: Optional[datetime], ret: Optional[datetime]) -> Optional[str]:
+
+def build_filename(
+    passenger: Optional[str], dep: Optional[datetime], ret: Optional[datetime], net_cost: Optional[float]
+) -> Optional[str]:
     if not passenger or not dep:
         return None
-    base = f"Flug, {sanitize_filename_component(passenger)}, {format_date(dep)}"
+
+    base = f"Flug, {sanitize_filename_component(passenger)}, {format_date(dep, 'hinflug')}"
     if ret:
-        base += f"-{format_date(ret)}"
+        base += f"-{format_date(ret, 'rueckflug')}"
+    if net_cost:
+        base += f", netcost {net_cost:.2f}"
+
     return base + ".pdf"
+
 
 def process_file(pdf_path: Path, dry_run: bool = False) -> Tuple[bool, str]:
     try:
         lines = extract_lines(pdf_path)
         passenger = parse_name_from_text(lines)
         dep, ret = parse_dates_from_text(lines)
-        new_name = build_filename(passenger, dep, ret)
+        net_cost = parse_net_cost_from_text(lines)
+        new_name = build_filename(passenger, dep, ret, net_cost)
         if not new_name:
-            return False, f"[{pdf_path.name}] Konnte erforderliche Daten nicht sicher ermitteln (Name oder Abflugdatum fehlt)."
+            return (
+                False,
+                f"[{pdf_path.name}] Konnte erforderliche Daten nicht sicher ermitteln (Name oder Abflugdatum fehlt).",
+            )
 
         new_path = pdf_path.with_name(new_name)
         if dry_run:
@@ -185,6 +193,7 @@ def process_file(pdf_path: Path, dry_run: bool = False) -> Tuple[bool, str]:
             return True, f"Umbenannt: {pdf_path.name}  →  {final_path.name}"
     except Exception as e:
         return False, f"[{pdf_path.name}] Fehler: {e}"
+
 
 def main():
     ap = argparse.ArgumentParser(description="Rename Eurowings PDF invoices by passenger and trip dates.")
@@ -211,6 +220,7 @@ def main():
         ok_all = ok_all and ok
 
     sys.exit(0 if ok_all else 1)
+
 
 if __name__ == "__main__":
     main()
