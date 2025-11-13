@@ -2,18 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-Rename Eurowings PDF invoices to:
-  "Flug, {PassengerName}, {DepDate}-{RetDate}.pdf"
+Rename Eurowings and Free2Move PDF invoices.
+
+Eurowings format: "Flug, {PassengerName}, {DepDate}-{RetDate}.pdf"
+Free2Move format: "Free2move, {PickupDate}-{ReturnDate}, netcost {NetCost}.pdf"
 
 Heuristics:
-- Tries to find the passenger name near keywords: "Passagier", "Passenger", "Reisender", "Reisende", "Name".
-- Tries to find flight dates labeled "Hinflug", "Rückflug" (German) or "Outbound", "Return" (English).
-- Falls back to the earliest and latest realistic travel dates found near flight numbers (EWxxx) if labels not present.
-- Ignores obvious invoice dates by context when possible.
+- Detects Free2Move invoices by filename prefix "Free2move"
+- For Eurowings: finds passenger name near keywords "Passagier", "Passenger", etc.
+- For Eurowings: finds flight dates labeled "Hinflug", "Rückflug" or near flight numbers
+- For Free2Move: extracts pickup and return dates from the trip details table
+- For both: extracts net cost from invoice
 
 Usage:
-  python rename_eurowings_invoice.py /path/to/file.pdf
-  python rename_eurowings_invoice.py /path/to/*.pdf --dry-run
+  python parse.py /path/to/file.pdf
+  python parse.py /path/to/*.pdf --dry-run
 """
 
 import re
@@ -149,6 +152,72 @@ def extract_lines(pdf_path: Path) -> List[str]:
     return lines
 
 
+def parse_free2move_dates(lines: List[str]) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """
+    Parse pickup and return dates from Free2Move PDF.
+    Expected format: date on one line, time on the next line
+    Example:
+      22.09.25
+      08:59
+    """
+    # Pattern for short date format DD.MM.YY
+    date_pattern = re.compile(r"^(\d{2})\.(\d{2})\.(\d{2})$")
+    
+    dates = []
+    for line in lines:
+        m = date_pattern.match(line)
+        if m:
+            day, month, year = m.groups()
+            # Convert 2-digit year to 4-digit (20YY)
+            full_year = f"20{year}"
+            try:
+                date = datetime.strptime(f"{day}.{month}.{full_year}", "%d.%m.%Y")
+                dates.append(date)
+            except ValueError:
+                continue
+    
+    if len(dates) >= 2:
+        # Return first two dates found (pickup and return)
+        dates.sort()
+        return dates[0], dates[1]
+    
+    return None, None
+
+
+def parse_free2move_net_cost(lines: List[str]) -> Optional[float]:
+    """
+    Parse net cost from Free2Move PDF.
+    Look for a line with "Netto" and then find the first Euro amount after "€" symbols.
+    Example structure:
+      Netto
+      USt.
+      Brutto
+      €
+      %
+      €
+      €
+      146,71    <- This is the net cost
+    """
+    # Look for "Netto" and extract the amount that comes after
+    for i, line in enumerate(lines):
+        if line == "Netto":
+            # Look through the next several lines for Euro amounts
+            euro_pattern = re.compile(r"^(\d{1,4}),(\d{2})$")
+            
+            # Check the next 10 lines for the net amount
+            for j in range(i + 1, min(i + 11, len(lines))):
+                m = euro_pattern.match(lines[j])
+                if m:
+                    # First match after the header row should be the net cost
+                    amount_str = f"{m.group(1)}.{m.group(2)}"
+                    try:
+                        return float(amount_str)
+                    except ValueError:
+                        pass
+    
+    return None
+
+
 def build_filename(
     passenger: Optional[str], dep: Optional[datetime], ret: Optional[datetime], net_cost: Optional[float]
 ) -> Optional[str]:
@@ -164,18 +233,53 @@ def build_filename(
     return base + ".pdf"
 
 
+def build_free2move_filename(
+    dep: Optional[datetime], ret: Optional[datetime], net_cost: Optional[float]
+) -> Optional[str]:
+    """
+    Build filename for Free2Move invoice.
+    Format: "Free2move, DD.MM.-DD.MM.YYYY, netcost XXX.XX.pdf"
+    """
+    if not dep:
+        return None
+    
+    base = "Free2move, " + format_date(dep, 'hinflug')
+    if ret:
+        base += f"-{format_date(ret, 'rueckflug')}"
+    if net_cost:
+        base += f", netcost {net_cost:.2f}"
+    
+    return base + ".pdf"
+
+
 def process_file(pdf_path: Path, dry_run: bool = False) -> Tuple[bool, str]:
     try:
         lines = extract_lines(pdf_path)
-        passenger = parse_name_from_text(lines)
-        dep, ret = parse_dates_from_text(lines)
-        net_cost = parse_net_cost_from_text(lines)
-        new_name = build_filename(passenger, dep, ret, net_cost)
-        if not new_name:
-            return (
-                False,
-                f"[{pdf_path.name}] Konnte erforderliche Daten nicht sicher ermitteln (Name oder Abflugdatum fehlt).",
-            )
+        
+        # Check if this is a Free2Move invoice by filename prefix
+        is_free2move = pdf_path.name.startswith("Free2move")
+        
+        if is_free2move:
+            # Parse Free2Move invoice
+            dep, ret = parse_free2move_dates(lines)
+            net_cost = parse_free2move_net_cost(lines)
+            new_name = build_free2move_filename(dep, ret, net_cost)
+            if not new_name:
+                return (
+                    False,
+                    f"[{pdf_path.name}] Konnte erforderliche Daten nicht sicher ermitteln (Abflugdatum fehlt).",
+                )
+        else:
+            # Parse Eurowings invoice
+            passenger = parse_name_from_text(lines)
+            dep, ret = parse_dates_from_text(lines)
+            net_cost = parse_net_cost_from_text(lines)
+            new_name = build_filename(passenger, dep, ret, net_cost)
+            if not new_name:
+                return (
+                    False,
+                    f"[{pdf_path.name}] Konnte erforderliche Daten nicht sicher ermitteln (Name oder Abflugdatum fehlt).",
+                )
 
         new_path = pdf_path.with_name(new_name)
         if dry_run:
@@ -196,7 +300,7 @@ def process_file(pdf_path: Path, dry_run: bool = False) -> Tuple[bool, str]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Rename Eurowings PDF invoices by passenger and trip dates.")
+    ap = argparse.ArgumentParser(description="Rename Eurowings and Free2Move PDF invoices by passenger/dates and trip details.")
     ap.add_argument("paths", nargs="+", help="PDF-Dateien oder Globs (z. B. ~/Rechnungen/*.pdf)")
     ap.add_argument("--dry-run", action="store_true", help="Nur anzeigen, was umbenannt würde.")
     args = ap.parse_args()
