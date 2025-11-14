@@ -250,14 +250,21 @@ def build_free2move_filename(
 ) -> Optional[str]:
     """
     Build filename for Free2Move invoice.
-    Format: "Free2move, DD.MM.-DD.MM.YYYY, netcost XXX.XX.pdf"
+    Format: "Free2move, DD.MM.-DD.MM.YYYY, netcost XXX.XX.pdf" for multi-day
+    Format: "Free2move, DD.MM.YYYY, netcost XXX.XX.pdf" for same-day
     """
     if not dep:
         return None
     
-    base = "Free2move, " + format_date(dep, 'hinflug')
-    if ret:
+    # Check if it's a same-day rental
+    if ret and ret != dep:
+        # Multi-day rental: use date range format
+        base = "Free2move, " + format_date(dep, 'hinflug')
         base += f"-{format_date(ret, 'rueckflug')}"
+    else:
+        # Same-day rental: show only single date with full year
+        base = "Free2move, " + format_date(dep, 'rueckflug')
+    
     if net_cost:
         base += f", netcost {net_cost:.2f}"
     
