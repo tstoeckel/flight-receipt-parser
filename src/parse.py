@@ -156,9 +156,15 @@ def parse_free2move_dates(lines: List[str]) -> Tuple[Optional[datetime], Optiona
     """
     Parse pickup and return dates from Free2Move PDF.
     Expected format: date on one line, time on the next line
-    Example:
+    Example for multi-day rental:
       22.09.25
       08:59
+      ...
+      24.09.25
+      14:36
+    Example for same-day rental:
+      24.09.25
+      17:03
     """
     # Pattern for short date format DD.MM.YY
     date_pattern = re.compile(r"^(\d{2})\.(\d{2})\.(\d{2})$")
@@ -177,9 +183,12 @@ def parse_free2move_dates(lines: List[str]) -> Tuple[Optional[datetime], Optiona
                 continue
     
     if len(dates) >= 2:
-        # Return first two dates found (pickup and return)
+        # Multi-day rental: return first two dates found (pickup and return)
         dates.sort()
         return dates[0], dates[1]
+    elif len(dates) == 1:
+        # Same-day rental: use the same date for both pickup and return
+        return dates[0], dates[0]
     
     return None, None
 
@@ -196,13 +205,16 @@ def parse_free2move_net_cost(lines: List[str]) -> Optional[float]:
       %
       €
       €
-      146,71    <- This is the net cost
+      146,71    <- This is the net cost (single value)
+    or
+      16,80 19,00    <- This is the net cost (first value when multiple on same line)
     """
     # Look for "Netto" and extract the amount that comes after
     for i, line in enumerate(lines):
         if line == "Netto":
             # Look through the next several lines for Euro amounts
-            euro_pattern = re.compile(r"^(\d{1,4}),(\d{2})$")
+            # Match lines that start with a number pattern (may have additional values after)
+            euro_pattern = re.compile(r"^(\d{1,4}),(\d{2})")
             
             # Check the next 10 lines for the net amount
             for j in range(i + 1, min(i + 11, len(lines))):
@@ -267,7 +279,7 @@ def process_file(pdf_path: Path, dry_run: bool = False) -> Tuple[bool, str]:
             if not new_name:
                 return (
                     False,
-                    f"[{pdf_path.name}] Konnte erforderliche Daten nicht sicher ermitteln (Abflugdatum fehlt).",
+                    f"[{pdf_path.name}] Konnte erforderliche Daten nicht sicher ermitteln (Abholung-Datum fehlt).",
                 )
         else:
             # Parse Eurowings invoice
